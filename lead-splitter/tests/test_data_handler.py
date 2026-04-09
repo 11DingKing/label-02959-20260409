@@ -7,7 +7,7 @@ import pytest
 import pandas as pd
 from pathlib import Path
 
-from src.data_handler import DataHandler, SplitConfig, DataStats
+from src.data_handler import DataHandler, SplitConfig, DataStats, SplitMode
 
 
 class TestDataHandlerInit:
@@ -421,3 +421,294 @@ class TestDeepAnalysis:
         stats = data_handler.get_stats()
         assert stats.analysis["date_range"] is None
         assert stats.analysis["provider_id_empty"] == 1
+
+
+class TestNewFeatures:
+    """测试新功能"""
+
+    def test_validate_split_config_with_mode_partial(self, loaded_handler: DataHandler):
+        """测试部分导出模式"""
+        # 配置总数小于数据总数
+        configs = [
+            SplitConfig(count=30, filename="part1"),
+            SplitConfig(count=30, filename="part2")
+        ]
+        
+        # 使用精确分配模式应该失败
+        valid, msg = loaded_handler.validate_split_config(configs)
+        assert valid is False
+        assert "不匹配" in msg
+        
+        # 使用部分导出模式应该成功
+        valid, msg, calculated_configs = loaded_handler.validate_split_config_with_mode(
+            configs, SplitMode.PARTIAL
+        )
+        assert valid is True
+        assert len(calculated_configs) == 3  # 2个配置 + 1个未分配
+        assert calculated_configs[2].filename == "未分配"
+        assert calculated_configs[2].count == 40  # 100 - 30 - 30 = 40
+
+    def test_validate_split_config_with_mode_ratio(self, loaded_handler: DataHandler):
+        """测试按比例分配模式"""
+        configs = [
+            SplitConfig(count=0, filename="part1", ratio=0.3),
+            SplitConfig(count=0, filename="part2", ratio=0.3),
+            SplitConfig(count=0, filename="part3", ratio=0.4)
+        ]
+        
+        valid, msg, calculated_configs = loaded_handler.validate_split_config_with_mode(
+            configs, SplitMode.RATIO
+        )
+        assert valid is True
+        assert len(calculated_configs) == 3
+        assert calculated_configs[0].count == 30  # 100 * 0.3
+        assert calculated_configs[1].count == 30  # 100 * 0.3
+        assert calculated_configs[2].count == 40  # 100 * 0.4
+
+    def test_validate_split_config_with_mode_ratio_remainder(self, loaded_handler: DataHandler):
+        """测试按比例分配模式的余数处理"""
+        # 100条数据，按 0.33, 0.33, 0.34 分配
+        configs = [
+            SplitConfig(count=0, filename="part1", ratio=0.33),
+            SplitConfig(count=0, filename="part2", ratio=0.33),
+            SplitConfig(count=0, filename="part3", ratio=0.34)
+        ]
+        
+        valid, msg, calculated_configs = loaded_handler.validate_split_config_with_mode(
+            configs, SplitMode.RATIO
+        )
+        assert valid is True
+        # 总数应该等于100
+        total = sum(c.count for c in calculated_configs)
+        assert total == 100
+        # 最后一组应该包含余数
+        assert calculated_configs[2].count >= calculated_configs[0].count
+
+    def test_split_and_export_preserve_all_columns(self, loaded_handler: DataHandler, temp_dir: Path):
+        """测试保留所有原始字段的导出"""
+        configs = [SplitConfig(count=100, filename="all_data")]
+        output_dir = temp_dir / "output"
+        
+        success, msg, files = loaded_handler.split_and_export(
+            configs, str(output_dir), preserve_all_columns=True
+        )
+        
+        assert success is True
+        assert len(files) == 1
+        
+        # 验证导出内容
+        df = pd.read_excel(files[0])
+        # 应该包含所有原始字段
+        assert 'wm_poi_id' in df.columns
+        assert 'provider_id' in df.columns
+        assert 'lead_tag' in df.columns
+        assert 'status' in df.columns
+        assert 'modifier' in df.columns
+        assert 'ctime' in df.columns
+        # 应该包含分配组列
+        assert '分配组' in df.columns
+        assert df['分配组'].iloc[0] == 'all_data'
+
+    def test_split_and_export_partial_mode(self, loaded_handler: DataHandler, temp_dir: Path):
+        """测试部分导出模式"""
+        configs = [
+            SplitConfig(count=30, filename="part1"),
+            SplitConfig(count=30, filename="part2")
+        ]
+        output_dir = temp_dir / "output"
+        
+        success, msg, files = loaded_handler.split_and_export(
+            configs, str(output_dir), mode=SplitMode.PARTIAL
+        )
+        
+        assert success is True
+        assert len(files) == 3  # 2个配置 + 1个未分配
+        
+        # 验证每个文件的行数
+        df1 = pd.read_excel(files[0])
+        df2 = pd.read_excel(files[1])
+        df3 = pd.read_excel(files[2])
+        
+        assert len(df1) == 30
+        assert len(df2) == 30
+        assert len(df3) == 40  # 未分配的
+
+    def test_split_and_export_ratio_mode(self, loaded_handler: DataHandler, temp_dir: Path):
+        """测试按比例分配模式"""
+        configs = [
+            SplitConfig(count=0, filename="part1", ratio=0.3),
+            SplitConfig(count=0, filename="part2", ratio=0.3),
+            SplitConfig(count=0, filename="part3", ratio=0.4)
+        ]
+        output_dir = temp_dir / "output"
+        
+        success, msg, files = loaded_handler.split_and_export(
+            configs, str(output_dir), mode=SplitMode.RATIO
+        )
+        
+        assert success is True
+        assert len(files) == 3
+        
+        # 验证每个文件的行数
+        df1 = pd.read_excel(files[0])
+        df2 = pd.read_excel(files[1])
+        df3 = pd.read_excel(files[2])
+        
+        assert len(df1) == 30
+        assert len(df2) == 30
+        assert len(df3) == 40
+
+    def test_get_export_preview(self, loaded_handler: DataHandler):
+        """测试导出预览功能"""
+        configs = [
+            SplitConfig(count=30, filename="part1"),
+            SplitConfig(count=30, filename="part2"),
+            SplitConfig(count=40, filename="part3")
+        ]
+        
+        success, msg, preview = loaded_handler.get_export_preview(configs)
+        
+        assert success is True
+        assert preview is not None
+        assert preview.total_rows == 100
+        assert len(preview.columns) > 0
+        assert len(preview.groups) == 3
+        
+        # 验证每组信息
+        assert preview.groups[0]["filename"] == "part1"
+        assert preview.groups[0]["count"] == 30
+        assert len(preview.groups[0]["sample_data"]) <= 3  # 最多3条预览
+        
+        assert preview.groups[1]["filename"] == "part2"
+        assert preview.groups[1]["count"] == 30
+        
+        assert preview.groups[2]["filename"] == "part3"
+        assert preview.groups[2]["count"] == 40
+
+    def test_get_export_preview_partial_mode(self, loaded_handler: DataHandler):
+        """测试部分导出模式的预览"""
+        configs = [
+            SplitConfig(count=30, filename="part1"),
+            SplitConfig(count=30, filename="part2")
+        ]
+        
+        success, msg, preview = loaded_handler.get_export_preview(
+            configs, mode=SplitMode.PARTIAL
+        )
+        
+        assert success is True
+        assert len(preview.groups) == 3  # 2个配置 + 1个未分配
+        assert preview.groups[2]["filename"] == "未分配"
+        assert preview.groups[2]["count"] == 40
+
+    def test_millisecond_timestamp_detection(self, data_handler: DataHandler, temp_dir: Path):
+        """测试毫秒级时间戳识别"""
+        # 创建包含毫秒级时间戳的数据
+        current_ms = int(pd.Timestamp.now().timestamp() * 1000)
+        df = pd.DataFrame({
+            'wm_poi_id': ['POI001', 'POI002', 'POI003'],
+            'ctime': [current_ms, current_ms + 1000, current_ms + 2000]  # 毫秒级时间戳
+        })
+        file_path = temp_dir / "ms_timestamp.xlsx"
+        df.to_excel(file_path, index=False)
+        data_handler.load_file(str(file_path))
+        
+        stats = data_handler.get_stats()
+        assert stats.analysis["date_range"] is not None
+        # 应该识别为近期日期，不是1970年
+        assert "1970" not in stats.analysis["date_range"]["earliest"]
+
+    def test_microsecond_timestamp_detection(self, data_handler: DataHandler, temp_dir: Path):
+        """测试微秒级时间戳识别"""
+        # 创建包含微秒级时间戳的数据
+        current_us = int(pd.Timestamp.now().timestamp() * 1000000)
+        df = pd.DataFrame({
+            'wm_poi_id': ['POI001', 'POI002', 'POI003'],
+            'ctime': [current_us, current_us + 1000000, current_us + 2000000]  # 微秒级时间戳
+        })
+        file_path = temp_dir / "us_timestamp.xlsx"
+        df.to_excel(file_path, index=False)
+        data_handler.load_file(str(file_path))
+        
+        stats = data_handler.get_stats()
+        assert stats.analysis["date_range"] is not None
+        # 应该识别为近期日期，不是1970年
+        assert "1970" not in stats.analysis["date_range"]["earliest"]
+
+    def test_timestamp_constants(self):
+        """测试时间戳常量定义"""
+        from src.data_handler import (
+            TIMESTAMP_MIN_SECONDS,
+            TIMESTAMP_MAX_SECONDS,
+            TIMESTAMP_MILLISECONDS_THRESHOLD,
+            TIMESTAMP_MICROSECONDS_THRESHOLD
+        )
+        
+        # 验证常量值
+        assert TIMESTAMP_MIN_SECONDS == 946684800  # 2000-01-01
+        assert TIMESTAMP_MAX_SECONDS == 4102444800  # 2100-01-01
+        assert TIMESTAMP_MILLISECONDS_THRESHOLD == 10**12
+        assert TIMESTAMP_MICROSECONDS_THRESHOLD == 10**15
+
+    def test_split_mode_enum(self):
+        """测试分割模式枚举"""
+        from src.data_handler import SplitMode
+        
+        assert SplitMode.EXACT.value == "精确分配"
+        assert SplitMode.PARTIAL.value == "部分导出"
+        assert SplitMode.RATIO.value == "按比例分配"
+
+    def test_export_preview_dataclass(self):
+        """测试导出预览数据类"""
+        from src.data_handler import ExportPreview
+        
+        preview = ExportPreview(
+            total_rows=100,
+            columns=['col1', 'col2'],
+            groups=[{"filename": "test", "count": 10, "sample_data": []}],
+            sample_data=[{"col1": "value1"}]
+        )
+        
+        assert preview.total_rows == 100
+        assert len(preview.columns) == 2
+        assert len(preview.groups) == 1
+        assert len(preview.sample_data) == 1
+
+    def test_validate_split_config_with_mode_invalid_ratio(self, loaded_handler: DataHandler):
+        """测试按比例分配模式的无效比例"""
+        # 比例为0
+        configs = [
+            SplitConfig(count=0, filename="part1", ratio=0.0),
+            SplitConfig(count=0, filename="part2", ratio=1.0)
+        ]
+        
+        valid, msg, _ = loaded_handler.validate_split_config_with_mode(
+            configs, SplitMode.RATIO
+        )
+        assert valid is False
+        assert "比例" in msg
+        
+        # 比例大于1
+        configs2 = [
+            SplitConfig(count=0, filename="part1", ratio=0.5),
+            SplitConfig(count=0, filename="part2", ratio=1.5)
+        ]
+        
+        valid2, msg2, _ = loaded_handler.validate_split_config_with_mode(
+            configs2, SplitMode.RATIO
+        )
+        assert valid2 is False
+        assert "比例" in msg2
+
+    def test_validate_split_config_with_mode_partial_exceed(self, loaded_handler: DataHandler):
+        """测试部分导出模式配置总数超过数据总数"""
+        configs = [
+            SplitConfig(count=60, filename="part1"),
+            SplitConfig(count=50, filename="part2")  # 总数110 > 100
+        ]
+        
+        valid, msg, _ = loaded_handler.validate_split_config_with_mode(
+            configs, SplitMode.PARTIAL
+        )
+        assert valid is False
+        assert "不能大于" in msg
