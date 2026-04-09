@@ -14,6 +14,37 @@ from .logger import get_logger
 logger = get_logger(__name__)
 
 
+# 尝试导入 Qt 模块，如果失败则使用备用方案
+try:
+    from PyQt6.QtCore import QObject, pyqtSignal
+    QT_AVAILABLE = True
+except ImportError:
+    QT_AVAILABLE = False
+    
+    # 定义备用的 QObject 和 pyqtSignal
+    class QObject:
+        """备用 QObject 类，用于非 Qt 环境"""
+        pass
+    
+    def pyqtSignal(*args, **kwargs):
+        """备用 pyqtSignal 装饰器，用于非 Qt 环境"""
+        class Signal:
+            def __init__(self):
+                self._callbacks = []
+            
+            def connect(self, callback):
+                self._callbacks.append(callback)
+            
+            def emit(self, *args, **kwargs):
+                for callback in self._callbacks:
+                    try:
+                        callback(*args, **kwargs)
+                    except Exception:
+                        pass
+        
+        return Signal()
+
+
 # Unix 时间戳检测范围常量
 # 2000-01-01 00:00:00 UTC 的 Unix 时间戳
 TIMESTAMP_MIN_SECONDS = 946684800
@@ -81,8 +112,14 @@ BUSINESS_COLUMNS = {
 DATE_COLUMN_PATTERNS = ["ctime", "date2datekey", "首次上线时间", "营业时间"]
 
 
-class DataHandler:
+class DataHandler(QObject):
     """数据处理器"""
+
+    # 进度信号：(current, total, message)
+    if QT_AVAILABLE:
+        progress = pyqtSignal(int, int, str)
+    else:
+        progress = pyqtSignal()
 
     # 支持的文件格式
     SUPPORTED_FORMATS = ['.xlsx', '.xls', '.csv']
@@ -97,6 +134,7 @@ class DataHandler:
     }
 
     def __init__(self):
+        super().__init__()
         self._df: Optional[pd.DataFrame] = None
         self._file_path: Optional[Path] = None
         logger.info("DataHandler 初始化完成")
@@ -502,6 +540,20 @@ class DataHandler:
         logger.info("导出预览生成完成")
         return True, "预览生成成功", preview
 
+    def _emit_progress(self, current: int, total: int, message: str):
+        """
+        发射进度信号
+        同时调用回调函数（保持向后兼容）
+        """
+        # 发射 Qt 信号
+        try:
+            self.progress.emit(current, total, message)
+        except Exception:
+            # 如果信号连接失败，忽略错误
+            pass
+        
+        logger.debug(f"进度: {current}/{total} - {message}")
+
     def split_and_export(
         self,
         configs: List[SplitConfig],
@@ -516,7 +568,7 @@ class DataHandler:
         参数:
             configs: 分割配置列表
             output_dir: 输出目录
-            progress_callback: 进度回调函数
+            progress_callback: 进度回调函数（保持向后兼容）
             mode: 分割模式（默认精确分配）
             preserve_all_columns: 是否保留所有原始字段（默认False，保持向后兼容）
         
@@ -529,6 +581,10 @@ class DataHandler:
             - 保留所有原始字段
             - 在每条记录末尾追加一个"分配组"列标明属于哪个分割组
             - 导出的 Excel 文件第一行要有表头
+        
+        进度更新:
+            - 通过 Qt 信号槽机制发射进度信号
+            - 同时支持 progress_callback 回调函数（保持向后兼容）
         """
         logger.info(f"开始分割导出, 输出目录: {output_dir}, 模式: {mode.value}")
 
@@ -553,8 +609,13 @@ class DataHandler:
             for i, config in enumerate(calculated_configs):
                 logger.info(f"正在导出第 {i + 1}/{total_parts} 份: {config.filename}, 数量: {config.count}")
 
+                # 发射进度信号
+                message = f"正在导出第 {i + 1} 份: {config.filename}"
+                self._emit_progress(i, total_parts, message)
+                
+                # 同时调用回调函数（保持向后兼容）
                 if progress_callback:
-                    progress_callback(i, total_parts, f"正在导出第 {i + 1} 份: {config.filename}")
+                    progress_callback(i, total_parts, message)
 
                 end_index = current_index + config.count
                 slice_df = self._df.iloc[current_index:end_index].copy()
@@ -582,6 +643,10 @@ class DataHandler:
 
                 current_index = end_index
 
+            # 发射完成信号
+            self._emit_progress(total_parts, total_parts, "导出完成")
+            
+            # 同时调用回调函数（保持向后兼容）
             if progress_callback:
                 progress_callback(total_parts, total_parts, "导出完成")
 

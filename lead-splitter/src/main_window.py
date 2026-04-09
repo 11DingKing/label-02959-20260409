@@ -37,12 +37,28 @@ class ExportWorker(QThread):
         self.save_dir = save_dir
 
     def run(self):
-        def on_progress(current, total, message):
-            self.progress.emit(current, total, message)
+        # 使用 Qt 信号槽机制连接进度信号
+        # DataHandler 的 progress 信号直接连接到 ExportWorker 的 progress 信号
+        # 这样可以确保信号在正确的线程中处理
+        try:
+            # 连接 DataHandler 的 progress 信号到本线程的 progress 信号
+            self.handler.progress.connect(self.progress.emit)
+        except Exception:
+            # 如果信号连接失败（比如在非 Qt 环境下），忽略错误
+            pass
 
+        # 调用 split_and_export，不需要传递回调函数
+        # DataHandler 会通过信号槽机制发射进度信号
         success, msg, files = self.handler.split_and_export(
-            self.configs, self.save_dir, on_progress
+            self.configs, self.save_dir
         )
+        
+        # 断开信号连接（可选，但良好的实践）
+        try:
+            self.handler.progress.disconnect(self.progress.emit)
+        except Exception:
+            pass
+            
         self.finished.emit(success, msg, files)
 
 
